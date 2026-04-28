@@ -51,3 +51,4 @@ jobs:
             git commit -m "Update USD rate state"
             git push
           fi
+
