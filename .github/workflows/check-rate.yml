@@ -2,13 +2,13 @@ name: Check USD rate
 
 on:
   schedule:
-    # Каждые 30 минут. GitHub может задерживать запуск на пиковых нагрузках,
-    # реальный интервал бывает 30–60 минут — это нормально.
-    - cron: "7,37 * * * *"
+    # Раз в 20 минут, на нестандартных минутах (3, 23, 43).
+    # Это снижает риск задержек GitHub на пиковых "круглых" минутах.
+    - cron: "3,23,43 * * * *"
   workflow_dispatch:  # кнопка "Run workflow" для ручного запуска
 
 permissions:
-  contents: write  # нужно, чтобы коммитить last_rate.json обратно в репозиторий
+  contents: write  # для коммита last_rate.json и failure_count.txt
 
 jobs:
   check:
@@ -35,20 +35,47 @@ jobs:
           playwright install chromium --with-deps
 
       - name: Check exchange rate
+        id: check
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python eubank_usd_bot.py
 
+      - name: Track failures and notify
+        if: always()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STEP_OUTCOME: ${{ steps.check.outcome }}
+        run: |
+          if [ "$STEP_OUTCOME" = "success" ]; then
+            # Сбрасываем счётчик при успехе
+            echo "0" > failure_count.txt
+          else
+            # Увеличиваем счётчик неудач
+            COUNT=$(cat failure_count.txt 2>/dev/null || echo "0")
+            COUNT=$((COUNT + 1))
+            echo "$COUNT" > failure_count.txt
+            # Если 3 подряд — шлём предупреждение
+            if [ "$COUNT" = "3" ]; then
+              MSG="⚠️ <b>Бот курса USD: проблема</b>%0AНе удалось получить курс 3 раза подряд. Возможно, банк изменил вёрстку сайта или временно недоступен.%0A%0A<a href=\"https://github.com/${{ github.repository }}/actions\">Открыть логи</a>"
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+                -d "chat_id=${TELEGRAM_CHAT_ID}" \
+                -d "text=${MSG}" \
+                -d "parse_mode=HTML" \
+                -d "disable_web_page_preview=true"
+            fi
+          fi
+
       - name: Commit updated state
+        if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add last_rate.json
+          git add last_rate.json failure_count.txt 2>/dev/null || true
           if git diff --staged --quiet; then
-            echo "Курс не изменился — коммитить нечего."
+            echo "Нечего коммитить."
           else
-            git commit -m "Update USD rate state"
+            git commit -m "Update bot state"
             git push
           fi
-
